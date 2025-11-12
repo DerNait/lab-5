@@ -290,6 +290,9 @@ fn main() {
             animate_spin: false,
             spin_speed: 0.0,
 
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
+
             band_frequency: 0.0,
             band_contrast: 0.0,
             lat_shear: 0.0,
@@ -331,6 +334,9 @@ fn main() {
             time_speed: 0.1,
             animate_spin: true,
             spin_speed: 0.05,
+
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
 
             band_frequency: 0.0,
             band_contrast: 0.0,
@@ -377,6 +383,9 @@ fn main() {
             animate_time: false, time_speed: 0.0,
             animate_spin: false,  spin_speed: 0.0,
 
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
+
             band_frequency: 4.0,
             band_contrast: 1.0,
             lat_shear: 0.2,
@@ -419,7 +428,10 @@ fn main() {
             cell_size: 1.0, w1: 1.0, w2: 0.0, w3: 0.0, w4: 0.0,
             dist: VoronoiDistance::Euclidean,
             animate_time: false, time_speed: 0.0,
-            animate_spin: false, spin_speed: 0.0,
+            animate_spin: true, spin_speed: 1.2,
+
+            ring_swirl_amp: 0.05,
+            ring_swirl_freq: 10.0,
 
             band_frequency: 0.0,
             band_contrast: 0.0,
@@ -466,6 +478,9 @@ fn main() {
                     animate_time: false, time_speed: 0.0,
                     animate_spin: false, spin_speed: 0.0,
 
+                    ring_swirl_amp: 0.0,
+                    ring_swirl_freq: 8.0,
+
                     band_frequency: 0.0,
                     band_contrast: 0.0,
                     lat_shear: 0.0,
@@ -506,6 +521,9 @@ fn main() {
                     dist: VoronoiDistance::Euclidean,
                     animate_time: false, time_speed: 0.0,
                     animate_spin: false, spin_speed: 0.0,
+
+                    ring_swirl_amp: 0.0,
+                    ring_swirl_freq: 8.0,
 
                     band_frequency: 0.0,
                     band_contrast: 0.0,

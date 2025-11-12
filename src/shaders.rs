@@ -96,7 +96,7 @@ fn sample_color_stops(stops: &[ColorStop], x01: f32, hardness: f32) -> Color {
     Color::lerp(a.color, b.color, t)
 }
 
-/// ==================== Noise settings (genérico) ====================
+/// ==================== Noise settings (genérico)
 
 /// Plano del anillo para proyectar posición OBJ → UV sintéticos
 #[derive(Clone, Copy)]
@@ -178,6 +178,11 @@ pub struct NoiseParams {
     pub animate_spin: bool,
     pub spin_speed: f32,
 
+    // Giro de anillo (solo tinte angular; no cambia el radio)
+    pub ring_swirl_amp: f32,
+    /// Frecuencia angular (cuántas ondas alrededor de 2π; p.ej. 4, 8, 12)
+    pub ring_swirl_freq: f32,
+
     // --------- NUEVOS: usados por BandedGas (ignorados por otros tipos) ----------
     pub band_frequency: f32,   // densidad de bandas por radian
     pub band_contrast: f32,    // 0..1, forma de onda más dura
@@ -208,6 +213,9 @@ impl NoiseParams {
             time_speed: 0.0,
             animate_spin: false,
             spin_speed: 0.0,
+
+            ring_swirl_amp: 0.0,   // por defecto apagado
+            ring_swirl_freq: 8.0,
 
             band_frequency: 4.0,
             band_contrast: 0.85,
@@ -440,24 +448,22 @@ impl FragmentShader for ProceduralLayerShader {
 
         // Elegimos cómo evaluar 'n' según el tipo de ruido
         let n = match self.noise.kind {
-            // Radial en OBJ: usa radio en el plano XZ *sin normalizar*
+            // Radial en OBJ: usa radio en el plano XZ/XY *sin normalizar el vector*
             NoiseType::RadialGradient { inner, outer, invert, bias, gamma } => {
-                // Elige el plano correcto para el anillo
                 let (px, py, a, b) = if uniforms.ring_plane_xy {
                     (p_obj.x, p_obj.y, uniforms.ring_a.max(1e-6), uniforms.ring_b.max(1e-6))
                 } else {
-                    // si tu malla estuviera en XZ, pon ring_plane_xy = false
                     (p_obj.x, p_obj.z, uniforms.ring_a.max(1e-6), uniforms.ring_b.max(1e-6))
                 };
 
-                // radio elíptico normalizado: (x/a)^2 + (y/b)^2
+                // Radio elíptico normalizado: mantiene el grosor del anillo QUIETO
                 let r_ell = ((px / a).powi(2) + (py / b).powi(2)).sqrt();
 
-                // inner/outer son fracciones del borde exterior (0..1)
                 let i = inner.clamp(0.0, 0.999);
                 let o = outer.clamp(i + 1e-6, 1.0);
                 let mut rn = ((r_ell - i) / (o - i)).clamp(0.0, 1.0);
 
+                // Curvatura radial; NO aplicar wobble aquí
                 rn = shape_bias_gamma(rn, bias, gamma);
                 let v = if invert { rn } else { 1.0 - rn };
                 v.clamp(0.0, 1.0)
@@ -473,7 +479,7 @@ impl FragmentShader for ProceduralLayerShader {
                 let v = if invert { rn } else { 1.0 - rn };
                 v.clamp(0.0, 1.0)
             }
-            // NUEVO: Radial en UV "sintéticos" generados desde OBJ (centrado en el planeta)
+            // Radial en UV "sintéticos" generados desde OBJ (centrado en el planeta)
             NoiseType::UVRadialGradientObj { plane, radius_max, invert, bias, gamma } => {
                 let (px, py) = match plane {
                     RingPlane::XY => (p_obj.x, p_obj.y),
@@ -490,7 +496,35 @@ impl FragmentShader for ProceduralLayerShader {
             _ => eval_noise(p_unit, uniforms, &self.noise),
         };
 
+        // Color base por palette
         let mut col = sample_color_stops(&self.color_stops, n, self.color_hardness);
+
+        // Tinte angular que GIRA (sin tocar el radio rn): solo para anillos RadialGradient
+        if let NoiseType::RadialGradient { .. } = self.noise.kind {
+            // Recalcula ángulo elíptico estable (usa x/a, y/b)
+            let (px, py, a, b) = if uniforms.ring_plane_xy {
+                (p_obj.x, p_obj.y, uniforms.ring_a.max(1e-6), uniforms.ring_b.max(1e-6))
+            } else {
+                (p_obj.x, p_obj.z, uniforms.ring_a.max(1e-6), uniforms.ring_b.max(1e-6))
+            };
+            let ex = (px / a);
+            let ey = (py / b);
+            let mut theta = ey.atan2(ex); // [-π, π]
+            if self.noise.animate_spin {
+                theta += uniforms.time * self.noise.spin_speed;
+            }
+            // u ∈ [0,1] desde el ángulo
+            let u = 0.5 + theta / (2.0 * std::f32::consts::PI);
+            // “grano” angular que viaja alrededor
+            let grain = (u * self.noise.ring_swirl_freq * 2.0 * std::f32::consts::PI).sin() * 0.5 + 0.5; // [0,1]
+
+            // Tinte sutil (no cambia geometría ni rn)
+            let amp = self.noise.ring_swirl_amp; // sugerencia: 0.03..0.08
+            let shade_lo = 1.0 - amp;
+            let shade_hi = 1.0 + amp;
+            let tint = shade_lo + (shade_hi - shade_lo) * grain; // ~ [1-amp, 1+amp]
+            col = col * tint; // si tu Color no clampa, puedes añadir clamp por componente aquí
+        }
 
         if self.lighting_enabled {
             let l = dot(&frag.normal, &self.light_dir).max(0.0);
