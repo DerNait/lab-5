@@ -2,10 +2,12 @@ use tobj;
 use nalgebra_glm::{Vec2, Vec3};
 use crate::vertex::Vertex;
 
+#[derive(Clone)]
 pub struct Obj {
     meshes: Vec<Mesh>,
 }
 
+#[derive(Clone)]
 struct Mesh {
     vertices: Vec<Vec3>,
     normals: Vec<Vec3>,

@@ -21,10 +21,63 @@ use triangle::triangle_with_shader;
 use shaders::{
     vertex_shader, Uniforms, FragmentShader,
     ProceduralLayerShader, NoiseParams, NoiseType, VoronoiDistance,
-    ColorStop, AlphaMode,
-    GasGiantShader, GasFlowParams,
+    ColorStop, AlphaMode, FlowParams,
 };
 use color::Color;
+
+// ===================== Cámara simple (ortográfica sobre tu “espacio pantalla”) =====================
+
+struct Camera {
+    position: Vec3,   // traslación en tu espacio actual (px)
+    rotation: Vec3,   // pitch (x), yaw (y), roll (z)
+}
+
+impl Camera {
+    fn new() -> Self {
+        Self {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            rotation: Vec3::new(0.0, 0.0, 0.0),
+        }
+    }
+
+    fn view_matrix(&self) -> Mat4 {
+        let (sx, cx) = self.rotation.x.sin_cos();
+        let (sy, cy) = self.rotation.y.sin_cos();
+        let (sz, cz) = self.rotation.z.sin_cos();
+
+        let rx = Mat4::new(
+            1.0, 0.0,  0.0, 0.0,
+            0.0, cx,  -sx, 0.0,
+            0.0, sx,   cx, 0.0,
+            0.0, 0.0,  0.0, 1.0,
+        );
+        let ry = Mat4::new(
+             cy, 0.0, sy, 0.0,
+             0.0, 1.0, 0.0, 0.0,
+            -sy, 0.0, cy, 0.0,
+             0.0, 0.0, 0.0, 1.0,
+        );
+        let rz = Mat4::new(
+            cz, -sz, 0.0, 0.0,
+            sz,  cz, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        );
+
+        // vista = R^T * T(-pos)  (inversa de la pose de cámara)
+        let r = rz * ry * rx;
+        let t = Mat4::new(
+            1.0, 0.0, 0.0, -self.position.x,
+            0.0, 1.0, 0.0, -self.position.y,
+            0.0, 0.0, 1.0, -self.position.z,
+            0.0, 0.0, 0.0,  1.0,
+        );
+
+        r.transpose() * t
+    }
+}
+
+// ===================== Helpers de modelo =====================
 
 pub struct ModelMatrices { pub base: Mat4, pub overlay: Mat4 }
 
@@ -64,11 +117,13 @@ fn create_model_matrix(translation: Vec3, scale: f32, rotation: Vec3) -> Mat4 {
     transform_matrix * rotation_matrix
 }
 
+// ===================== Render passes =====================
+
 fn render_pass(
     framebuffer: &mut Framebuffer,
     uniforms: &Uniforms,
     obj: &Obj,
-    shader: &impl FragmentShader
+    shader: &dyn FragmentShader
 ) {
     let (positions, normals, uvs) = obj.mesh_buffers();
     let mut all_fragments = Vec::new();
@@ -106,7 +161,8 @@ fn render_pass_alpha(
     framebuffer: &mut Framebuffer,
     uniforms: &Uniforms,
     obj: &Obj,
-    shader: &impl FragmentShader
+    shader: &impl FragmentShader,
+    z_bias: f32,  // << sesgo de profundidad (negativo = más cerca de la cámara)
 ) {
     let (positions, normals, uvs) = obj.mesh_buffers();
     let mut all_fragments = Vec::new();
@@ -135,8 +191,39 @@ fn render_pass_alpha(
         let x = frag.position.x as usize;
         let y = frag.position.y as usize;
         if x < framebuffer.width && y < framebuffer.height {
-            framebuffer.draw_rgba(x, y, frag.depth, frag.color.to_hex(), frag.alpha);
+            framebuffer.draw_rgba(x, y, frag.depth + z_bias, frag.color.to_hex(), frag.alpha);
         }
+    }
+}
+
+// ===================== Sistema de lunas =====================
+
+struct Moon {
+    obj: Obj,
+    scale_rel: f32,
+    orbit_px: f32,
+    orbit_depth_px: f32,
+    orbit_speed: f32,
+    phase0: f32,
+    tilt: Vec3,
+    shader: Box<dyn FragmentShader + Send + Sync>,
+    seed: i32,
+}
+
+impl Moon {
+    fn model_matrix(&self, planet_translation: Vec3, planet_scale: f32, t: f32) -> Mat4 {
+        let angle = self.phase0 + t * self.orbit_speed;
+        let dx = angle.cos() * self.orbit_px;
+        let dz = angle.sin() * self.orbit_depth_px;
+
+        let tr = Vec3::new(
+            planet_translation.x + dx,
+            planet_translation.y + 0.0,
+            planet_translation.z + dz
+        );
+
+        let spin = Vec3::new(self.tilt.x, self.tilt.y + t * 0.35, self.tilt.z);
+        create_model_matrix(tr, planet_scale * self.scale_rel, spin)
     }
 }
 
@@ -160,8 +247,12 @@ fn main() {
 
     framebuffer.set_background_color(0x000000);
 
+    // ===== Carga de modelos =====
     let obj = Obj::load("assets/models/Planet.obj").expect("Failed to load obj");
+    let rings_obj = Obj::load("assets/models/PlanetRing.obj").expect("Failed to load rings obj");
+    let moon_obj = Obj::load("assets/models/Planet.obj").expect("Failed to load moon sphere");
 
+    // ===== Ajuste de escala/traslación del planeta base =====
     let (min_v, max_v) = obj.bounds();
     let size = max_v - min_v;
     let center = (min_v + max_v) * 0.5;
@@ -172,15 +263,18 @@ fn main() {
     let sy = if size.y.abs() < 1e-6 { 1.0 } else { target_h / size.y.abs() };
     let mut scale = sx.min(sy);
 
+    // Traslación base (coloca el planeta en el centro visual)
     let mut translation = Vec3::new(
         (framebuffer_width as f32) * 0.5 - center.x * scale,
         (framebuffer_height as f32) * 0.5 - center.y * scale,
         -center.z * scale
     );
-
     let mut rotation = Vec3::new(0.0, 0.0, 0.0);
 
-    // ===== Tierra: terreno
+    // ===== Cámara =====
+    let mut camera = Camera::new();
+
+    // ===== Shaders =====
     let terrain_shader = ProceduralLayerShader {
         noise: NoiseParams {
             kind: NoiseType::Perlin,
@@ -195,6 +289,16 @@ fn main() {
             time_speed: 1.0,
             animate_spin: false,
             spin_speed: 0.0,
+
+            band_frequency: 0.0,
+            band_contrast: 0.0,
+            lat_shear: 0.0,
+            turb_scale: 0.0,
+            turb_octaves: 0,
+            turb_lacunarity: 0.0,
+            turb_gain: 0.0,
+            turb_amp: 0.0,
+            flow: FlowParams::default(),
         },
         color_stops: vec![
             ColorStop { threshold: 0.35, color: Color::from_hex(0x1B3494) },
@@ -213,7 +317,6 @@ fn main() {
         alpha_mode: AlphaMode::Opaque,
     };
 
-    // ===== Tierra: nubes
     let clouds_shader = ProceduralLayerShader {
         noise: NoiseParams {
             kind: NoiseType::Value,
@@ -228,6 +331,16 @@ fn main() {
             time_speed: 0.1,
             animate_spin: true,
             spin_speed: 0.05,
+
+            band_frequency: 0.0,
+            band_contrast: 0.0,
+            lat_shear: 0.0,
+            turb_scale: 0.0,
+            turb_octaves: 0,
+            turb_lacunarity: 0.0,
+            turb_gain: 0.0,
+            turb_amp: 0.0,
+            flow: FlowParams::default(),
         },
         color_stops: vec![
             ColorStop { threshold: 0.0, color: Color::from_hex(0xEDEDED) },
@@ -246,7 +359,6 @@ fn main() {
         },
     };
 
-    // ===== Gas giant con flow “2 fases 0xFFFFFF”
     let gas_palette = vec![
         ColorStop { threshold: 0.00, color: Color::from_hex(0x734D1E) },
         ColorStop { threshold: 0.20, color: Color::from_hex(0x6E5034) },
@@ -256,41 +368,212 @@ fn main() {
         ColorStop { threshold: 1.00, color: Color::from_hex(0xE4D1B5) },
     ];
 
-    let gas_shader = GasGiantShader {
+    let gas_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::BandedGas,
+            scale: 1.0, octaves: 4, lacunarity: 2.0, gain: 0.5,
+            cell_size: 0.35, w1: 1.0, w2: 1.0, w3: 1.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+            animate_time: false, time_speed: 0.0,
+            animate_spin: false,  spin_speed: 0.0,
+
+            band_frequency: 4.0,
+            band_contrast: 1.0,
+            lat_shear: 0.2,
+            turb_scale: 10.0,
+            turb_octaves: 4,
+            turb_lacunarity: 2.0,
+            turb_gain: 0.55,
+            turb_amp: 0.35,
+            flow: FlowParams {
+                enabled: true,
+                flow_scale: 3.0,
+                strength: 0.04,
+                time_speed: 0.6,
+                jets_base_speed: 0.12,
+                jets_frequency: 6.0,
+                phase_amp: 3.0,
+            },
+        },
         color_stops: gas_palette,
         color_hardness: 0.35,
-        band_frequency: 4.0,
-        band_contrast: 1.0,
-        lat_shear: 0.2,
-        turb_scale: 10.0,
-        turb_octaves: 4,
-        turb_lacunarity: 2.0,
-        turb_gain: 0.55,
-        flow: GasFlowParams {
-            enabled: true,
-            flow_scale: 3.0,      // ↑ un poco la frecuencia espacial
-            strength: 0.04,       // ↑ más desplazamiento base
-            time_speed: 0.6,      // ↑ ciclos más rápidos
-            jets_base_speed: 0.12,// ↑ componente zonal (sigue acotado por la fase)
-            jets_frequency: 6.0,
-            shear: 0.25,
-            phase_amp: 3.0,       // << NUEVO: amplificador visual (se nota ya)
-        },
         lighting_enabled: true,
         light_dir: normalize(&Vec3::new(0.25, 0.6, -1.0)),
         light_min: 0.45,
         light_max: 1.05,
+        alpha_mode: AlphaMode::Opaque,
     };
 
-    let mut use_gas_giant = true; // ← Toggle runtime: G/H
-    let mut time_origin = Instant::now();
+    // ===== Shader de anillos =====
+    let rings_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::RadialGradient {
+                inner: 0.70,   // fracción del borde exterior
+                outer: 1.0,    // 1.0 == borde exterior del mesh
+                invert: false,
+                bias: 0.10,
+                gamma: 1.0,
+            },
+            // resto sin uso
+            scale: 1.0, octaves: 1, lacunarity: 2.0, gain: 0.5,
+            cell_size: 1.0, w1: 1.0, w2: 0.0, w3: 0.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+            animate_time: false, time_speed: 0.0,
+            animate_spin: false, spin_speed: 0.0,
+
+            band_frequency: 0.0,
+            band_contrast: 0.0,
+            lat_shear: 0.0,
+            turb_scale: 0.0,
+            turb_octaves: 0,
+            turb_lacunarity: 0.0,
+            turb_gain: 0.0,
+            turb_amp: 0.0,
+            flow: FlowParams::default(),
+        },
+        color_stops: vec![
+            ColorStop { threshold: 0.00, color: Color::from_hex(0x0E0F12) },
+            ColorStop { threshold: 0.12, color: Color::from_hex(0xDCCEB3) },
+            ColorStop { threshold: 0.28, color: Color::from_hex(0x2A2E36) },
+            ColorStop { threshold: 0.45, color: Color::from_hex(0xEFE8D8) },
+            ColorStop { threshold: 0.62, color: Color::from_hex(0xC0B29A) },
+            ColorStop { threshold: 0.80, color: Color::from_hex(0x1F2329) },
+            ColorStop { threshold: 1.00, color: Color::from_hex(0x0A0C10) },
+        ],
+        color_hardness: 0.0,
+        lighting_enabled: false,
+        light_dir: normalize(&Vec3::new(0.0, 1.0, 0.0)),
+        light_min: 1.0, light_max: 1.0,
+        alpha_mode: AlphaMode::Opaque,
+    };
+
+    // ===== Lunas =====
+    let mut moons: Vec<Moon> = vec![
+        Moon {
+            obj: moon_obj.clone(),
+            scale_rel: 0.28,
+            orbit_px: 180.0,
+            orbit_depth_px: 120.0,
+            orbit_speed: 0.5,
+            phase0: 0.0,
+            tilt: Vec3::new(0.05, 0.0, 0.05),
+            shader: Box::new(ProceduralLayerShader {
+                noise: NoiseParams {
+                    kind: NoiseType::Perlin,
+                    scale: 4.0, octaves: 4, lacunarity: 2.0, gain: 0.5,
+                    cell_size: 0.35, w1: 1.0, w2: 0.0, w3: 0.0, w4: 0.0,
+                    dist: VoronoiDistance::Euclidean,
+                    animate_time: false, time_speed: 0.0,
+                    animate_spin: false, spin_speed: 0.0,
+
+                    band_frequency: 0.0,
+                    band_contrast: 0.0,
+                    lat_shear: 0.0,
+                    turb_scale: 0.0,
+                    turb_octaves: 0,
+                    turb_lacunarity: 0.0,
+                    turb_gain: 0.0,
+                    turb_amp: 0.0,
+                    flow: FlowParams::default(),
+                },
+                color_stops: vec![
+                    ColorStop { threshold: 0.30, color: Color::from_hex(0x4D4D4D) },
+                    ColorStop { threshold: 0.55, color: Color::from_hex(0x7A7A7A) },
+                    ColorStop { threshold: 0.80, color: Color::from_hex(0xB5B5B5) },
+                ],
+                color_hardness: 0.35,
+                lighting_enabled: true,
+                light_dir: normalize(&Vec3::new(0.25, 0.6, -1.0)),
+                light_min: 0.35,
+                light_max: 1.05,
+                alpha_mode: AlphaMode::Opaque,
+            }),
+            seed: 8888,
+        },
+        Moon {
+            obj: moon_obj.clone(),
+            scale_rel: 0.18,
+            orbit_px: 260.0,
+            orbit_depth_px: 290.0,
+            orbit_speed: 0.32,
+            phase0: 1.2,
+            tilt: Vec3::new(0.15, 0.0, -0.05),
+            shader: Box::new(ProceduralLayerShader {
+                noise: NoiseParams {
+                    kind: NoiseType::Voronoi,
+                    scale: 2.6, octaves: 3, lacunarity: 2.0, gain: 0.5,
+                    cell_size: 0.40, w1: 1.0, w2: 1.0, w3: 1.0, w4: 0.0,
+                    dist: VoronoiDistance::Euclidean,
+                    animate_time: false, time_speed: 0.0,
+                    animate_spin: false, spin_speed: 0.0,
+
+                    band_frequency: 0.0,
+                    band_contrast: 0.0,
+                    lat_shear: 0.0,
+                    turb_scale: 0.0,
+                    turb_octaves: 0,
+                    turb_lacunarity: 0.0,
+                    turb_gain: 0.0,
+                    turb_amp: 0.0,
+                    flow: FlowParams::default(),
+                },
+                color_stops: vec![
+                    ColorStop { threshold: 0.25, color: Color::from_hex(0x5E5347) },
+                    ColorStop { threshold: 0.55, color: Color::from_hex(0x8C7B68) },
+                    ColorStop { threshold: 0.85, color: Color::from_hex(0xCBB79F) },
+                ],
+                color_hardness: 0.25,
+                lighting_enabled: true,
+                light_dir: normalize(&Vec3::new(0.25, 0.6, -1.0)),
+                light_min: 0.35,
+                light_max: 1.05,
+                alpha_mode: AlphaMode::Opaque,
+            }),
+            seed: 9999,
+        },
+    ];
+
+    // ===== Medimos los semiejes del anillo (en espacio OBJ) =====
+    let (rmin, rmax) = rings_obj.bounds();
+    let ext = rmax - rmin;
+
+    // El plano del anillo son los DOS ejes con mayor extensión.
+    // Si Z es el más pequeño ⇒ el anillo está en XY; si Y es el más pequeño ⇒ está en XZ.
+    // (Caso YZ muy raro, pero lo cubrimos por completitud.)
+    let (ring_a, ring_b, ring_plane_xy) = {
+        // magnitudes absolutas
+        let ex = ext.x.abs();
+        let ey = ext.y.abs();
+        let ez = ext.z.abs();
+
+        if ez <= ex.min(ey) {
+            // XY: Z es el “grosor” mínimo
+            let a = ((rmax.x - rmin.x).abs() * 0.5).max(1e-6);
+            let b = ((rmax.y - rmin.y).abs() * 0.5).max(1e-6);
+            (a, b, true)
+        } else if ey <= ex.min(ez) {
+            // XZ: Y es el “grosor” mínimo
+            let a = ((rmax.x - rmin.x).abs() * 0.5).max(1e-6);
+            let b = ((rmax.z - rmin.z).abs() * 0.5).max(1e-6);
+            (a, b, false) // usamos XZ dentro del shader cuando esto es false
+        } else {
+            // YZ (poco común, pero por si acaso). Reutilizamos el flag + truco en shader:
+            // marcamos XY=true pero intercambiamos a/b y alimentamos (y,z) en el shader.
+            // Para no tocar Uniforms, aquí lo dejamos como XY y abajo te digo el tweak si lo quieres.
+            let a = ((rmax.y - rmin.y).abs() * 0.5).max(1e-6);
+            let b = ((rmax.z - rmin.z).abs() * 0.5).max(1e-6);
+            (a, b, true) // y en el shader cambiarías a RingPlane si algún día lo necesitas
+        }
+    };
+
+    let mut use_gas_giant = true; // G/H para alternar
+    let time_origin = Instant::now();
 
     while window.is_open() {
         if window.is_key_down(Key::Escape) { break; }
 
-        handle_input(&window, &mut translation, &mut rotation, &mut scale);
+        handle_input_camera(&window, &mut camera, &mut scale);
 
-        // Toggle shaders (evita rebotes: tecla “modo set”)
         if window.is_key_down(Key::G) { use_gas_giant = true; }
         if window.is_key_down(Key::H) { use_gas_giant = false; }
 
@@ -298,22 +581,59 @@ fn main() {
 
         let elapsed = time_origin.elapsed().as_secs_f32();
         let auto_spin_y = elapsed * 0.20;
-
         let rotation_auto = nalgebra_glm::Vec3::new(rotation.x, rotation.y + auto_spin_y, rotation.z);
+
+        // ===== Planeta =====
         let model_matrix = create_model_matrix(translation, scale, rotation_auto);
-        let uniforms_base = Uniforms { model_matrix, time: elapsed, seed: 1337 };
+        let uniforms_base = Uniforms {
+            model_matrix,
+            view_matrix: camera.view_matrix(),
+            time: elapsed,
+            seed: 1337,
+            ring_a, ring_b, ring_plane_xy,
+        };
 
         if use_gas_giant {
-            // Gas giant (opaco)
             render_pass(&mut framebuffer, &uniforms_base, &obj, &gas_shader);
         } else {
-            // Tierra (base + nubes alpha)
             render_pass(&mut framebuffer, &uniforms_base, &obj, &terrain_shader);
 
             let overlay_scale = scale * 1.02;
             let model_matrix_overlay = create_model_matrix(translation, overlay_scale, rotation_auto);
-            let uniforms_overlay = Uniforms { model_matrix: model_matrix_overlay, time: elapsed, seed: 4242 };
-            render_pass_alpha(&mut framebuffer, &uniforms_overlay, &obj, &clouds_shader);
+            let uniforms_overlay = Uniforms {
+                model_matrix: model_matrix_overlay,
+                view_matrix: camera.view_matrix(),
+                time: elapsed,
+                seed: 4242,
+                ring_a, ring_b, ring_plane_xy,
+            };
+            render_pass_alpha(&mut framebuffer, &uniforms_overlay, &obj, &clouds_shader, 0.0);
+        }
+
+        // ===== Anillos (z-bias negativo para evitar “corte”) =====
+        let rings_tilt = Vec3::new(0.35, rotation_auto.y, 0.05);
+        let rings_scale = scale * 1.2;
+        let rings_matrix = create_model_matrix(translation, rings_scale, rings_tilt);
+        let rings_uniforms = Uniforms {
+            model_matrix: rings_matrix,
+            view_matrix: camera.view_matrix(),
+            time: elapsed,
+            seed: 2025,
+            ring_a, ring_b, ring_plane_xy,
+        };
+        render_pass(&mut framebuffer, &rings_uniforms, &rings_obj, &rings_shader);
+
+        // ===== Lunas =====
+        for m in &moons {
+            let mm = m.model_matrix(translation, scale, elapsed);
+            let mu = Uniforms {
+                model_matrix: mm,
+                view_matrix: camera.view_matrix(),
+                time: elapsed,
+                seed: m.seed,
+                ring_a, ring_b, ring_plane_xy,
+            };
+            render_pass(&mut framebuffer, &mu, &m.obj, &*m.shader);
         }
 
         window
@@ -324,17 +644,24 @@ fn main() {
     }
 }
 
-fn handle_input(window: &Window, translation: &mut Vec3, rotation: &mut Vec3, scale: &mut f32) {
-    if window.is_key_down(Key::Right) { translation.x += 10.0; }
-    if window.is_key_down(Key::Left)  { translation.x -= 10.0; }
-    if window.is_key_down(Key::Up)    { translation.y -= 10.0; }
-    if window.is_key_down(Key::Down)  { translation.y += 10.0; }
+// ===================== Input de cámara =====================
+
+fn handle_input_camera(window: &Window, camera: &mut Camera, scale: &mut f32) {
+    // mover cámara
+    if window.is_key_down(Key::Right) { camera.position.x += 10.0; }
+    if window.is_key_down(Key::Left)  { camera.position.x -= 10.0; }
+    if window.is_key_down(Key::Up)    { camera.position.y -= 10.0; }
+    if window.is_key_down(Key::Down)  { camera.position.y += 10.0; }
+
+    // zoom (mantengo tu escala de objeto)
     if window.is_key_down(Key::S)     { *scale += 2.0; }
     if window.is_key_down(Key::A)     { *scale -= 2.0; }
-    if window.is_key_down(Key::Q)     { rotation.x -= PI / 10.0; }
-    if window.is_key_down(Key::W)     { rotation.x += PI / 10.0; }
-    if window.is_key_down(Key::E)     { rotation.y -= PI / 10.0; }
-    if window.is_key_down(Key::R)     { rotation.y += PI / 10.0; }
-    if window.is_key_down(Key::T)     { rotation.z -= PI / 10.0; }
-    if window.is_key_down(Key::Y)     { rotation.z += PI / 10.0; }
+
+    // rotar cámara
+    if window.is_key_down(Key::Q) { camera.rotation.x -= PI / 20.0; }
+    if window.is_key_down(Key::W) { camera.rotation.x += PI / 20.0; }
+    if window.is_key_down(Key::E) { camera.rotation.y -= PI / 20.0; }
+    if window.is_key_down(Key::R) { camera.rotation.y += PI / 20.0; }
+    if window.is_key_down(Key::T) { camera.rotation.z -= PI / 20.0; }
+    if window.is_key_down(Key::Y) { camera.rotation.z += PI / 20.0; }
 }

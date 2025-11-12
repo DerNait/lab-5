@@ -55,9 +55,10 @@ impl Framebuffer {
 
         if self.zbuffer[idx] > depth {
             if alpha >= 0.999 {
+                // opaco
                 self.buffer[idx] = color;
             } else if alpha > 0.0 {
-                // alpha blending sobre el color existente
+                // semi-transparente: componemos
                 let dst = self.buffer[idx];
 
                 let sr = ((color >> 16) & 0xFF) as f32;
@@ -75,9 +76,10 @@ impl Framebuffer {
 
                 self.buffer[idx] = (rr << 16) | (rg << 8) | rb;
             }
-            if alpha >= 0.999 {
-                self.zbuffer[idx] = depth;
-            }
+
+            // IMPORTANTE: ahora también escribimos z aun con alpha,
+            // para que el propio anillo se ocluya correctamente y no quede “cortado”.
+            self.zbuffer[idx] = depth;
         }
     }
 }

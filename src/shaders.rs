@@ -1,5 +1,5 @@
 // shaders.rs
-use nalgebra_glm::{Vec2, Vec3, Mat3, Vec4, dot, normalize};
+use nalgebra_glm::{Vec2, Vec3, Mat3, Vec4, dot};
 use crate::vertex::Vertex;
 use crate::color::Color;
 use crate::noise;
@@ -7,20 +7,29 @@ use crate::noise;
 /// Uniforms compartidos
 pub struct Uniforms {
     pub model_matrix: nalgebra_glm::Mat4,
+    pub view_matrix:  nalgebra_glm::Mat4,
     pub time: f32,   // segundos para animación
     pub seed: i32,   // semilla base
+    pub ring_a: f32,      // semieje X (o el del primer eje del plano elegido)
+    pub ring_b: f32,      // semieje Y (o segundo eje)
+    pub ring_plane_xy: bool,
 }
 
 pub fn vertex_shader(vertex: &Vertex, uniforms: &Uniforms) -> Vertex {
     let position = Vec4::new(vertex.position.x, vertex.position.y, vertex.position.z, 1.0);
-    let transformed = uniforms.model_matrix * position;
+
+    // Aplicamos View * Model
+    let vm = uniforms.view_matrix * uniforms.model_matrix;
+    let transformed = vm * position;
 
     let transformed_position = nalgebra_glm::Vec3::new(transformed.x, transformed.y, transformed.z);
 
+    // normales con (View*Model) sin traslación
+    let m = vm;
     let model_mat3 = Mat3::new(
-        uniforms.model_matrix[0], uniforms.model_matrix[1], uniforms.model_matrix[2],
-        uniforms.model_matrix[4], uniforms.model_matrix[5], uniforms.model_matrix[6],
-        uniforms.model_matrix[8], uniforms.model_matrix[9], uniforms.model_matrix[10]
+        m[0],  m[1],  m[2],
+        m[4],  m[5],  m[6],
+        m[8],  m[9],  m[10]
     );
     let normal_matrix = model_mat3.transpose().try_inverse().unwrap_or(Mat3::identity());
     let transformed_normal = (normal_matrix * vertex.normal).normalize();
@@ -89,15 +98,74 @@ fn sample_color_stops(stops: &[ColorStop], x01: f32, hardness: f32) -> Color {
 
 /// ==================== Noise settings (genérico) ====================
 
+/// Plano del anillo para proyectar posición OBJ → UV sintéticos
 #[derive(Clone, Copy)]
-pub enum NoiseType { Value, Perlin, Voronoi }
+pub enum RingPlane { XY, XZ, YZ }
+
+#[derive(Clone, Copy)]
+pub enum NoiseType {
+    Value,
+    Perlin,
+    Voronoi,
+    BandedGas,
+    RadialGradient {
+        inner: f32,
+        outer: f32,
+        invert: bool,
+        bias: f32,
+        gamma: f32,
+    },
+    /// Degradé radial en espacio UV (0..1), centro por defecto (0.5,0.5)
+    UVRadialGradient {
+        center: nalgebra_glm::Vec2, // típicamente Vec2::new(0.5, 0.5)
+        invert: bool,
+        bias: f32,
+        gamma: f32,
+    },
+    /// NUEVO: radial en UV generado desde la POSICIÓN en OBJ (centrado en el origen del modelo)
+    UVRadialGradientObj {
+        plane: RingPlane,   // XY, XZ o YZ
+        radius_max: f32,    // radio externo del anillo en unidades del OBJ
+        invert: bool,
+        bias: f32,
+        gamma: f32,
+    },
+}
 
 #[derive(Clone, Copy)]
 pub enum VoronoiDistance { Euclidean, Manhattan, Chebyshev }
 
+/// Flowmap genérico: lo puede usar cualquier NoiseType (lo activas con `flow.enabled`)
+#[derive(Clone)]
+pub struct FlowParams {
+    pub enabled: bool,
+    pub flow_scale: f32,   // frecuencia del flowmap procedural
+    pub strength: f32,     // magnitud base del desplazamiento lon/lat
+    pub time_speed: f32,   // velocidad del “reloj” para las fases
+    pub jets_base_speed: f32,
+    pub jets_frequency: f32,
+    pub phase_amp: f32,    // ganancia visual por ciclo (0..+)
+}
+
+impl Default for FlowParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            flow_scale: 2.0,
+            strength: 0.0,
+            time_speed: 0.0,
+            jets_base_speed: 0.0,
+            jets_frequency: 1.0,
+            phase_amp: 0.0,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct NoiseParams {
     pub kind: NoiseType,
+
+    // Parámetros comunes (Value/Perlin/Voronoi)
     pub scale: f32,
     pub octaves: u32,
     pub lacunarity: f32,
@@ -109,13 +177,128 @@ pub struct NoiseParams {
     pub time_speed: f32,
     pub animate_spin: bool,
     pub spin_speed: f32,
+
+    // --------- NUEVOS: usados por BandedGas (ignorados por otros tipos) ----------
+    pub band_frequency: f32,   // densidad de bandas por radian
+    pub band_contrast: f32,    // 0..1, forma de onda más dura
+    pub lat_shear: f32,        // inclinación longitudinal dependiente de lon
+    pub turb_scale: f32,       // turbulencia (Perlin/FBM) sobre lon/lat
+    pub turb_octaves: u32,
+    pub turb_lacunarity: f32,
+    pub turb_gain: f32,
+    pub turb_amp: f32,
+
+    /// Flowmap opcional (para BandedGas o incluso para distorsionar Value/Perlin/Voronoi al mapear en esfera)
+    pub flow: FlowParams,
 }
 
-fn eval_noise(p_obj_unit: Vec3, uniforms: &Uniforms, params: &NoiseParams) -> f32 {
-    let spin = if params.animate_spin { uniforms.time * params.spin_speed } else { 0.0 };
-    let p = rotate_y(p_obj_unit, spin);
-    let t = if params.animate_time { uniforms.time * params.time_speed } else { 0.0 };
+impl NoiseParams {
+    /// Ayuda para “defaults” de BandedGas (si no quieres rellenar todo a mano)
+    pub fn banded_defaults(kind: NoiseType) -> Self {
+        Self {
+            kind,
+            scale: 1.0,
+            octaves: 4,
+            lacunarity: 2.0,
+            gain: 0.5,
+            cell_size: 0.35,
+            w1: 1.0, w2: 1.0, w3: 1.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+            animate_time: false,
+            time_speed: 0.0,
+            animate_spin: false,
+            spin_speed: 0.0,
 
+            band_frequency: 4.0,
+            band_contrast: 0.85,
+            lat_shear: 0.2,
+            turb_scale: 10.0,
+            turb_octaves: 4,
+            turb_lacunarity: 2.0,
+            turb_gain: 0.55,
+            turb_amp: 0.5,
+
+            flow: FlowParams::default(),
+        }
+    }
+}
+
+#[inline] fn to_spherical(p: Vec3) -> (f32, f32) {
+    let lon = p.z.atan2(p.x);
+    let lat = p.y.asin();
+    (lon, lat)
+}
+#[inline] fn wrap_pi(a: f32) -> f32 {
+    let mut x = a;
+    while x <= -std::f32::consts::PI { x += 2.0 * std::f32::consts::PI; }
+    while x >  std::f32::consts::PI  { x -= 2.0 * std::f32::consts::PI; }
+    x
+}
+
+/// Curvatura controlada del gradiente (mezcla bias y potencia)
+#[inline]
+fn shape_bias_gamma(mut x: f32, bias: f32, gamma: f32) -> f32 {
+    let b = bias.clamp(0.0, 1.0);
+    // mezcla entre lineal y cuadrática hacia el borde
+    x = x * (1.0 - b) + x * x * b;
+    let g = gamma.max(1e-6);
+    x.powf(g)
+}
+
+fn eval_noise(p_obj_unit_in: Vec3, uniforms: &Uniforms, params: &NoiseParams) -> f32 {
+    // Spin (rotación del patrón en espacio objeto)
+    let spin = if params.animate_spin { uniforms.time * params.spin_speed } else { 0.0 };
+    let mut p = rotate_y(p_obj_unit_in, spin);
+
+    // === Desplazamiento por FLOWMAP (lon/lat), si corresponde ===
+    let (mut lon, mut lat) = to_spherical(p);
+    if params.flow.enabled {
+        let u = lon * params.flow.flow_scale;
+        let v = lat * params.flow.flow_scale;
+        let a = 2.0 * std::f32::consts::PI * noise::value_noise_2d(u, v, uniforms.seed ^ 0xABCD);
+        let (sa, ca) = a.sin_cos();
+
+        // vector base a partir del valor de ruido
+        let lat_cos = lat.cos().abs().max(0.15);
+        let dlon = ca * params.flow.strength * lat_cos;
+        let dlat = sa * params.flow.strength * 0.5;
+
+        // deriva zonal acotada (no acumula infinito)
+        let jets = params.flow.jets_base_speed * (params.flow.jets_frequency * lat).sin();
+
+        // fases acotadas 0..1 + mezcla triangular para evitar “pops”
+        let t = uniforms.time * params.flow.time_speed;
+        let phase1 = t.fract();
+        let phase2 = (phase1 + 0.5).fract();
+        let flow_mix = ((phase1 - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+        let amp = params.flow.phase_amp.max(0.0);
+
+        let lon_a = wrap_pi(lon + (dlon + jets) * phase1 * amp);
+        let lat_a = (lat + dlat * phase1 * amp)
+            .clamp(-std::f32::consts::FRAC_PI_2 + 1e-3, std::f32::consts::FRAC_PI_2 - 1e-3);
+
+        let lon_b = wrap_pi(lon + (dlon + jets) * phase2 * amp);
+        let lat_b = (lat + dlat * phase2 * amp)
+            .clamp(-std::f32::consts::FRAC_PI_2 + 1e-3, std::f32::consts::FRAC_PI_2 - 1e-3);
+
+        // remuestrea p sobre la esfera desplazada
+        let bands_a = eval_bands_core(lon_a, lat_a, uniforms, params);
+        let bands_b = eval_bands_core(lon_b, lat_b, uniforms, params);
+        // si estamos en BandedGas y flow activo, devolvemos directamente las bandas mezcladas
+        if let NoiseType::BandedGas = params.kind {
+            return bands_a * (1.0 - flow_mix) + bands_b * flow_mix;
+        } else {
+            // para otros tipos, actualizamos (lon,lat) mezclado y reconstruimos p
+            let lon_m = wrap_pi(lon_a * (1.0 - flow_mix) + lon_b * flow_mix);
+            let lat_m =      lat_a * (1.0 - flow_mix) + lat_b * flow_mix;
+            let cl = lat_m.cos();
+            p = Vec3::new(cl * lon_m.cos(), lat_m.sin(), cl * lon_m.sin());
+            lon = lon_m; lat = lat_m;
+        }
+    }
+
+    // === Evaluación por tipo de ruido ===
+    let t = if params.animate_time { uniforms.time * params.time_speed } else { 0.0 };
     match params.kind {
         NoiseType::Value => {
             let f = noise::fbm_value_3proj(p, params.scale, t, params.octaves, params.lacunarity, params.gain, uniforms.seed);
@@ -137,7 +320,75 @@ fn eval_noise(p_obj_unit: Vec3, uniforms: &Uniforms, params: &NoiseParams) -> f3
             );
             f.clamp(0.0, 1.0)
         }
+        NoiseType::BandedGas => {
+            // sin flow (o flow ya manejado arriba): bandas “tipo Júpiter”
+            eval_bands_core(lon, lat, uniforms, params)
+        }
+        NoiseType::RadialGradient { inner, outer, invert, bias, gamma } => {
+            // p llega normalizado a la esfera del objeto. Para anillo, usa radio en XZ.
+            let r = (p.x * p.x + p.z * p.z).sqrt();
+            let i = (inner).max(1e-6);
+            let o = (outer).max(i + 1e-6);
+            let mut rn = ((r - i) / (o - i)).clamp(0.0, 1.0); // 0 en inner, 1 en outer
+            rn = shape_bias_gamma(rn, bias, gamma);
+            let v = if invert { rn } else { 1.0 - rn }; // por defecto: centro claro → borde oscuro
+            v.clamp(0.0, 1.0)
+        }
+        NoiseType::UVRadialGradient { center, invert, bias, gamma } => {
+            // Radial en UV nativos (mapeo lon/lat → uv)
+            let u_coord = 0.5 + lon / (2.0 * std::f32::consts::PI);
+            let v_coord = 0.5 + lat / std::f32::consts::PI;
+            let du = u_coord - center.x;
+            let dv = v_coord - center.y;
+            let max_r = 0.5_f32; // distancia desde centro al borde en UV
+            let mut rn = ((du * du + dv * dv).sqrt() / max_r).clamp(0.0, 1.0);
+            rn = shape_bias_gamma(rn, bias, gamma);
+            let val = if invert { rn } else { 1.0 - rn };
+            val.clamp(0.0, 1.0)
+        }
+        // La variante UVRadialGradientObj se implementa en shade() porque requiere p_obj crudo (no unit).
+        _ => 0.0, // aquí no se usa; se maneja en shade()
     }
+}
+
+// Núcleo de bandas (reutilizable para flow o no-flow)
+fn eval_bands_core(lon: f32, lat: f32, uniforms: &Uniforms, p: &NoiseParams) -> f32 {
+    // Representación periódica de la longitud
+    let (sln, cln) = lon.sin_cos();
+
+    // Turbulencia SEAMLESS: todo en espacio periódico (cos(lon), sin(lon), lat)
+    let turb = {
+        // Solo fBm 3-proyecciones (ya libre de seams); quitamos el perlin_2d(u=lon, v=lat)
+        let f = noise::fbm_perlin_3proj(
+            Vec3::new(cln, lat, sln), // coords periódicas
+            p.turb_scale.max(1e-6),   // usamos turb_scale como frecuencia
+            0.0,
+            p.turb_octaves, p.turb_lacunarity, p.turb_gain,
+            uniforms.seed ^ 0x4444
+        );
+        (f * 2.0 - 1.0) // [-1,1]
+    };
+
+    // Cizalla latitudinal periódica (en vez de ∝ lon)
+    let shear_term = p.lat_shear * sln;
+
+    // Bandas
+    let phase = p.band_frequency * (lat + shear_term + p.turb_amp * turb);
+    band_func(phase, p.band_contrast)
+}
+
+#[inline]
+fn band_func(x: f32, contrast: f32) -> f32 {
+    let s = 0.5 + 0.5 * x.sin();      // [0,1]
+    let c = contrast.clamp(0.0, 1.0); // mezcla soft/hard
+    let sc = s * s * (3.0 - 2.0 * s); // smoothstep(s)
+    sc * c + s * (1.0 - c)
+}
+
+#[inline]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// ==================== Alpha modes ====================
@@ -177,11 +428,68 @@ pub struct ProceduralLayerShader {
 
 impl FragmentShader for ProceduralLayerShader {
     fn shade(&self, frag: &FragAttrs, uniforms: &Uniforms) -> (Color, f32) {
-        let mut p = frag.obj_pos;
-        let mag = p.magnitude();
-        if mag > 1e-6 { p /= mag; }
+        // Mantén ambas: posición de objeto cruda (para anillos/planos)
+        // y posición unitaria (para ruidos esféricos en planetas).
+        let p_obj = frag.obj_pos;
+        let p_unit = {
+            let mut q = p_obj;
+            let m = q.magnitude();
+            if m > 1e-6 { q /= m; }
+            q
+        };
 
-        let n = eval_noise(p, uniforms, &self.noise);
+        // Elegimos cómo evaluar 'n' según el tipo de ruido
+        let n = match self.noise.kind {
+            // Radial en OBJ: usa radio en el plano XZ *sin normalizar*
+            NoiseType::RadialGradient { inner, outer, invert, bias, gamma } => {
+                // Elige el plano correcto para el anillo
+                let (px, py, a, b) = if uniforms.ring_plane_xy {
+                    (p_obj.x, p_obj.y, uniforms.ring_a.max(1e-6), uniforms.ring_b.max(1e-6))
+                } else {
+                    // si tu malla estuviera en XZ, pon ring_plane_xy = false
+                    (p_obj.x, p_obj.z, uniforms.ring_a.max(1e-6), uniforms.ring_b.max(1e-6))
+                };
+
+                // radio elíptico normalizado: (x/a)^2 + (y/b)^2
+                let r_ell = ((px / a).powi(2) + (py / b).powi(2)).sqrt();
+
+                // inner/outer son fracciones del borde exterior (0..1)
+                let i = inner.clamp(0.0, 0.999);
+                let o = outer.clamp(i + 1e-6, 1.0);
+                let mut rn = ((r_ell - i) / (o - i)).clamp(0.0, 1.0);
+
+                rn = shape_bias_gamma(rn, bias, gamma);
+                let v = if invert { rn } else { 1.0 - rn };
+                v.clamp(0.0, 1.0)
+            }
+
+            // Radial en UV nativos del mesh
+            NoiseType::UVRadialGradient { center, invert, bias, gamma } => {
+                let du = frag.uv.x - center.x;
+                let dv = frag.uv.y - center.y;
+                let max_r = 0.5_f32; // desde (0.5,0.5) al borde de la textura
+                let mut rn = ((du*du + dv*dv).sqrt() / max_r).clamp(0.0, 1.0);
+                rn = shape_bias_gamma(rn, bias, gamma);
+                let v = if invert { rn } else { 1.0 - rn };
+                v.clamp(0.0, 1.0)
+            }
+            // NUEVO: Radial en UV "sintéticos" generados desde OBJ (centrado en el planeta)
+            NoiseType::UVRadialGradientObj { plane, radius_max, invert, bias, gamma } => {
+                let (px, py) = match plane {
+                    RingPlane::XY => (p_obj.x, p_obj.y),
+                    RingPlane::XZ => (p_obj.x, p_obj.z),
+                    RingPlane::YZ => (p_obj.y, p_obj.z),
+                };
+                let r = (px*px + py*py).sqrt();
+                let mut rn = (r / radius_max.max(1e-6)).clamp(0.0, 1.0); // 0 centro, 1 borde
+                rn = shape_bias_gamma(rn, bias, gamma);
+                let v = if invert { rn } else { 1.0 - rn };
+                v.clamp(0.0, 1.0)
+            }
+            // El resto de tipos se evalúan como antes (usando p_unit)
+            _ => eval_noise(p_unit, uniforms, &self.noise),
+        };
+
         let mut col = sample_color_stops(&self.color_stops, n, self.color_hardness);
 
         if self.lighting_enabled {
@@ -191,138 +499,5 @@ impl FragmentShader for ProceduralLayerShader {
         }
         let a = alpha_from_noise(n, &self.alpha_mode);
         (col, a)
-    }
-}
-
-/// ==================== Shader: GasGiant con flow “2 fases” ====================
-
-#[derive(Clone)]
-pub struct GasFlowParams {
-    pub enabled: bool,
-    pub flow_scale: f32,     // frecuencia del flowmap procedural
-    pub strength: f32,       // magnitud base del desplazamiento lon/lat
-    pub time_speed: f32,     // velocidad del “reloj” para las fases
-    pub jets_base_speed: f32,
-    pub jets_frequency: f32,
-    pub shear: f32,          // reservado para extensiones
-    pub phase_amp: f32,      // << NUEVO: cuánto desplazan lon/lat por ciclo (gain visual)
-}
-
-/// Esféricas
-#[inline] fn to_spherical(p: Vec3) -> (f32, f32) {
-    let lon = p.z.atan2(p.x);
-    let lat = p.y.asin();
-    (lon, lat)
-}
-#[inline] fn wrap_pi(a: f32) -> f32 {
-    let mut x = a;
-    while x <= -std::f32::consts::PI { x += 2.0 * std::f32::consts::PI; }
-    while x >  std::f32::consts::PI  { x -= 2.0 * std::f32::consts::PI; }
-    x
-}
-
-pub struct GasGiantShader {
-    pub color_stops: Vec<ColorStop>,
-    pub color_hardness: f32,
-    pub band_frequency: f32,
-    pub band_contrast: f32,
-    pub lat_shear: f32,
-    pub turb_scale: f32,
-    pub turb_octaves: u32,
-    pub turb_lacunarity: f32,
-    pub turb_gain: f32,
-    pub flow: GasFlowParams,
-    pub lighting_enabled: bool,
-    pub light_dir: Vec3,
-    pub light_min: f32,
-    pub light_max: f32,
-}
-
-impl GasGiantShader {
-    fn flow_vector_static(&self, lon: f32, lat: f32, seed: i32) -> (f32, f32) {
-        if !self.flow.enabled { return (0.0, 0.0); }
-        let u = lon * self.flow.flow_scale;
-        let v = lat * self.flow.flow_scale;
-        let a = 2.0 * std::f32::consts::PI * noise::value_noise_2d(u, v, seed ^ 0xABCD);
-        let (sa, ca) = a.sin_cos();
-        let lat_cos = lat.cos().abs().max(0.15);
-        let dlon = ca * self.flow.strength * lat_cos;
-        let dlat = sa * self.flow.strength * 0.5;
-        (dlon, dlat)
-    }
-
-    #[inline]
-    fn band_func(&self, x: f32, contrast: f32) -> f32 {
-        let s = 0.5 + 0.5 * x.sin();
-        let c = contrast.clamp(0.0, 1.0);
-        let sc = s * s * (3.0 - 2.0 * s);
-        sc * c + s * (1.0 - c)
-    }
-
-    fn eval_bands(&self, lon: f32, lat: f32, uniforms: &Uniforms) -> f32 {
-        let turb = {
-            let u = lon * self.turb_scale;
-            let v = lat * self.turb_scale;
-            let n = noise::perlin_2d(u, v, uniforms.seed ^ 0x2222);
-            let f = noise::fbm_perlin_3proj(
-                Vec3::new(lon.cos(), lat, lon.sin()),
-                1.0, 0.0,
-                self.turb_octaves, self.turb_lacunarity, self.turb_gain,
-                uniforms.seed ^ 0x4444
-            );
-            (n * 2.0 - 1.0) * 0.5 + (f * 2.0 - 1.0) * 0.5
-        };
-        let shear_term = self.lat_shear * lon;
-        let phase = self.band_frequency * (lat + shear_term + turb);
-        self.band_func(phase, self.band_contrast)
-    }
-}
-
-impl FragmentShader for GasGiantShader {
-    fn shade(&self, frag: &FragAttrs, uniforms: &Uniforms) -> (Color, f32) {
-        // Normalizar a esfera
-        let mut p = frag.obj_pos;
-        let mag = p.magnitude();
-        if mag > 1e-6 { p /= mag; }
-        let (mut lon, mut lat) = to_spherical(p);
-
-        // Deriva zonal: mantenla acotada (sin acumulación infinita)
-        // (Si quisieras reactivar el drift continuo, aquí sumarías + uniforms.time * jets)
-        let jets = self.flow.jets_base_speed * (self.flow.jets_frequency * lat).sin();
-
-        // Fases 0..1 y mezcla triangular
-        let t = uniforms.time * self.flow.time_speed;
-        let phase1 = t.fract();
-        let phase2 = (phase1 + 0.5).fract();
-        let flow_mix = ((phase1 - 0.5).abs() * 2.0).clamp(0.0, 1.0);
-
-        // Vector de flujo estático + componente zonal
-        let (vx, vy) = self.flow_vector_static(lon, lat, uniforms.seed ^ 0x1357);
-        let vlon = vx + jets;
-
-        // AMPLIFICADOR VISUAL de la fase (para que se note)
-        let amp = self.flow.phase_amp.max(0.0);
-
-        // Dos muestreos faseados y mezcla sin “pop”
-        let lon_a = wrap_pi(lon + vlon * phase1 * amp);
-        let lat_a = (lat +  vy   * phase1 * amp)
-            .clamp(-std::f32::consts::FRAC_PI_2 + 1e-3, std::f32::consts::FRAC_PI_2 - 1e-3);
-
-        let lon_b = wrap_pi(lon + vlon * phase2 * amp);
-        let lat_b = (lat +  vy   * phase2 * amp)
-            .clamp(-std::f32::consts::FRAC_PI_2 + 1e-3, std::f32::consts::FRAC_PI_2 - 1e-3);
-
-        let bands_a = self.eval_bands(lon_a, lat_a, uniforms);
-        let bands_b = self.eval_bands(lon_b, lat_b, uniforms);
-        let bands   = bands_a * (1.0 - flow_mix) + bands_b * flow_mix;
-
-        let mut col = sample_color_stops(&self.color_stops, bands, self.color_hardness);
-
-        if self.lighting_enabled {
-            let l = dot(&frag.normal, &self.light_dir).max(0.0);
-            let mul = self.light_min + (self.light_max - self.light_min) * l;
-            col = col * mul;
-        }
-        (col, 1.0)
     }
 }
