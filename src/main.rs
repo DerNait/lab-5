@@ -262,6 +262,7 @@ fn main() {
     let sx = if size.x.abs() < 1e-6 { 1.0 } else { target_w / size.x.abs() };
     let sy = if size.y.abs() < 1e-6 { 1.0 } else { target_h / size.y.abs() };
     let mut scale = sx.min(sy);
+    scale *= 0.45; // un poco de margen
 
     // Traslación base (coloca el planeta en el centro visual)
     let mut translation = Vec3::new(
@@ -274,7 +275,7 @@ fn main() {
     // ===== Cámara =====
     let mut camera = Camera::new();
 
-    // ===== Shaders =====
+    // ===== Shaders base (Tierra / Gas) =====
     let terrain_shader = ProceduralLayerShader {
         noise: NoiseParams {
             kind: NoiseType::Perlin,
@@ -413,6 +414,272 @@ fn main() {
         alpha_mode: AlphaMode::Opaque,
     };
 
+    // ===== PLANETA ROCOso tipo Marte =====
+    let mars_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::Perlin,
+            scale: 4.0,
+            octaves: 4,
+            lacunarity: 2.0,
+            gain: 0.5,
+            cell_size: 0.40,
+            w1: 1.0, w2: 0.0, w3: 0.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+            animate_time: false,
+            time_speed: 0.0,
+            animate_spin: false,
+            spin_speed: 0.0,
+
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
+
+            band_frequency: 0.0,
+            band_contrast: 0.0,
+            lat_shear: 0.0,
+            turb_scale: 6.0,
+            turb_octaves: 3,
+            turb_lacunarity: 2.0,
+            turb_gain: 0.5,
+            turb_amp: 0.2,
+            flow: FlowParams::default(),
+        },
+        color_stops: vec![
+            ColorStop { threshold: 0.10, color: Color::from_hex(0x3D1F1A) }, // sombras rocas
+            ColorStop { threshold: 0.35, color: Color::from_hex(0x6B2F26) }, // rojo oscuro
+            ColorStop { threshold: 0.60, color: Color::from_hex(0xA94432) }, // rojo óxido
+            ColorStop { threshold: 0.85, color: Color::from_hex(0xD27A4A) }, // polvo
+            ColorStop { threshold: 1.00, color: Color::from_hex(0xF3C9A2) }, // zonas claras
+        ],
+        color_hardness: 0.35,
+        lighting_enabled: true,
+        light_dir: normalize(&Vec3::new(0.25, 0.6, -1.0)),
+        light_min: 0.35,
+        light_max: 1.05,
+        alpha_mode: AlphaMode::Opaque,
+    };
+
+     let mars_clouds_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::Value,
+            scale: 2.0,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            cell_size: 0.25,
+            w1: 1.0, w2: 0.0, w3: 0.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+            animate_time: true,
+            time_speed: 0.05,
+            animate_spin: true,
+            spin_speed: 0.02,
+
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
+
+            band_frequency: 0.0,
+            band_contrast: 0.0,
+            lat_shear: 0.0,
+            turb_scale: 0.0,
+            turb_octaves: 0,
+            turb_lacunarity: 0.0,
+            turb_gain: 0.0,
+            turb_amp: 0.0,
+            flow: FlowParams::default(),
+        },
+        color_stops: vec![
+            ColorStop { threshold: 0.0, color: Color::from_hex(0xEDEDED) },
+            ColorStop { threshold: 1.0, color: Color::from_hex(0xFFFFFF) },
+        ],
+        color_hardness: 0.0,
+        lighting_enabled: true,
+        light_dir: normalize(&Vec3::new(0.25, 0.6, -1.0)),
+        light_min: 0.8,
+        light_max: 1.0,
+        alpha_mode: AlphaMode::Threshold {
+            threshold: 0.60,
+            sharpness: 6.0,
+            coverage_bias: 0.05,
+            invert: false,
+        },
+    };
+
+    // ===== PLANETA tipo Urano (pastel, bandas suaves azuladas) =====
+    let uranus_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::BandedGas,
+            scale: 1.0, octaves: 3, lacunarity: 2.0, gain: 0.55,
+            cell_size: 0.35, w1: 1.0, w2: 1.0, w3: 1.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+            animate_time: false, time_speed: 0.0,
+            animate_spin: false,  spin_speed: 0.0,
+
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
+
+            band_frequency: 3.0,
+            band_contrast: 0.5,
+            lat_shear: 0.05,
+            turb_scale: 4.0,
+            turb_octaves: 3,
+            turb_lacunarity: 2.0,
+            turb_gain: 0.5,
+            turb_amp: 0.15,
+            flow: FlowParams::default(),
+        },
+        color_stops: vec![
+            ColorStop { threshold: 0.00, color: Color::from_hex(0x0A2F4F) },
+            ColorStop { threshold: 0.30, color: Color::from_hex(0x145D7A) },
+            ColorStop { threshold: 0.60, color: Color::from_hex(0x42A8C8) },
+            ColorStop { threshold: 0.85, color: Color::from_hex(0x7FD8E6) },
+            ColorStop { threshold: 1.00, color: Color::from_hex(0xC5F6FF) },
+        ],
+        color_hardness: 0.25,
+        lighting_enabled: true,
+        light_dir: normalize(&Vec3::new(0.25, 0.6, -1.0)),
+        light_min: 0.45,
+        light_max: 1.1,
+        alpha_mode: AlphaMode::Opaque,
+    };
+
+    // ===== PLANETA tipo Saturno (gaseoso amarillento, bandas suaves) =====
+    let saturn_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::BandedGas,
+            scale: 1.0,
+            octaves: 4,
+            lacunarity: 2.0,
+            gain: 0.5,
+            cell_size: 0.35,
+            w1: 1.0, w2: 1.0, w3: 1.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+
+            animate_time: false,
+            time_speed: 0.0,
+            animate_spin: false,
+            spin_speed: 0.0,
+
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
+
+            band_frequency: 5.0,
+            band_contrast: 1.0,
+
+            lat_shear: 0.10,
+
+            turb_scale: 1.0,
+            turb_octaves: 4,
+            turb_lacunarity: 2.0,
+            turb_gain: 0.5,
+            turb_amp: 0.35,
+
+            flow: FlowParams {
+                enabled: true,
+                flow_scale: 3.0,
+                strength: 0.04,
+                time_speed: 0.25,
+                jets_base_speed: 0.1,
+                jets_frequency: 6.0,
+                phase_amp: 3.0,
+            },
+        },
+        color_stops: vec![
+            // zona de sombras ligeramente marrón
+            ColorStop { threshold: 0.00, color: Color::from_hex(0xEDD198) },
+            ColorStop { threshold: 0.18, color: Color::from_hex(0xB48D5A) },
+
+            // crema suave bastante ancho
+            ColorStop { threshold: 0.32, color: Color::from_hex(0xD5BE8A) },
+
+            // franja anaranjada finita
+            ColorStop { threshold: 0.36, color: Color::from_hex(0xE5A95C) },
+
+            // vuelve a crema más claro
+            ColorStop { threshold: 0.44, color: Color::from_hex(0xEFD49C) },
+
+            // otra zona amplia crema muy clara
+            ColorStop { threshold: 0.58, color: Color::from_hex(0xF4E0B6) },
+
+            // tramo final casi todo crema muy luminoso
+            ColorStop { threshold: 0.72, color: Color::from_hex(0xF6E6C4) },
+            ColorStop { threshold: 0.86, color: Color::from_hex(0xFBF0D9) },
+            ColorStop { threshold: 1.00, color: Color::from_hex(0xFFF9E6) },
+        ],
+        // Un poquito más de dureza para que se lean las franjas
+        color_hardness: 0.24,
+
+        lighting_enabled: true,
+        light_dir: normalize(&Vec3::new(0.25, 0.6, -1.0)),
+        light_min: 0.50,
+        light_max: 1.08,
+        alpha_mode: AlphaMode::Opaque,
+    };
+
+    // ===== ESTRELLA / SOL =====
+    let star_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::BandedGas,
+
+            // Base de ruido
+            scale: 1.0,
+            octaves: 16,
+            lacunarity: 2.2,
+            gain: 0.52,
+            cell_size: 0.35,
+            w1: 1.0, w2: 1.0, w3: 1.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+
+            // El "tiempo" principal lo vamos a manejar con el flow,
+            // aquí lo dejamos neutro
+            animate_time: false,
+            time_speed: 0.0,
+
+            // Ligero spin global para que todo gire despacio
+            animate_spin: true,
+            spin_speed: 0.12,
+
+            // No usamos swirl de anillos aquí
+            ring_swirl_amp: 0.0,
+            ring_swirl_freq: 8.0,
+
+            // Bandas base (se rompen con turbulencia + flow)
+            band_frequency: 20.0,   // pocas bandas grandes
+            band_contrast: 0.05,   // no tan duras, más "lava"
+
+            lat_shear: 0.05,       // un pelín de inclinación
+
+            // Turbulencia fuerte para romper las bandas
+            turb_scale: 8.0,
+            turb_octaves: 4,
+            turb_lacunarity: 2.0,
+            turb_gain: 0.55,
+            turb_amp: 1.4,         // alto = formas muy retorcidas
+
+            // Flowmap: aquí está la magia de la "lava" que fluye
+            flow: FlowParams {
+                enabled: true,
+                flow_scale: 2.5,   // tamaño de los remolinos
+                strength: 0.09,    // cuánto se desplazan lon/lat
+                time_speed: 0.7,   // velocidad de animación del flow
+                jets_base_speed: 0.04,
+                jets_frequency: 5.0,
+                phase_amp: 2.0,    // qué tan fuerte se siente la transición de fases
+            },
+        },
+        color_stops: vec![
+            ColorStop { threshold: 0.00, color: Color::from_hex(0xA33600) }, // sombras muy oscuras
+            ColorStop { threshold: 0.25, color: Color::from_hex(0x7A1400) }, // rojo profundo
+            ColorStop { threshold: 0.50, color: Color::from_hex(0xE04800) }, // naranja brillante
+            ColorStop { threshold: 0.75, color: Color::from_hex(0xFFC640) }, // amarillo intenso
+            ColorStop { threshold: 1.00, color: Color::from_hex(0xFFF9D0) }, // casi blanco
+        ],
+        color_hardness: 0.15,         // bordes algo marcados entre "placas" de lava
+        lighting_enabled: false,      // autoiluminado
+        light_dir: normalize(&Vec3::new(0.0, 1.0, 0.0)),
+        light_min: 1.0,
+        light_max: 1.0,
+        alpha_mode: AlphaMode::Opaque,
+    };
+
     // ===== Shader de anillos =====
     let rings_shader = ProceduralLayerShader {
         noise: NoiseParams {
@@ -463,8 +730,8 @@ fn main() {
     let mut moons: Vec<Moon> = vec![
         Moon {
             obj: moon_obj.clone(),
-            scale_rel: 0.28,
-            orbit_px: 180.0,
+            scale_rel: 0.22,
+            orbit_px: 200.0,
             orbit_depth_px: 120.0,
             orbit_speed: 0.5,
             phase0: 0.0,
@@ -555,45 +822,69 @@ fn main() {
     let (rmin, rmax) = rings_obj.bounds();
     let ext = rmax - rmin;
 
-    // El plano del anillo son los DOS ejes con mayor extensión.
-    // Si Z es el más pequeño ⇒ el anillo está en XY; si Y es el más pequeño ⇒ está en XZ.
-    // (Caso YZ muy raro, pero lo cubrimos por completitud.)
     let (ring_a, ring_b, ring_plane_xy) = {
-        // magnitudes absolutas
         let ex = ext.x.abs();
         let ey = ext.y.abs();
         let ez = ext.z.abs();
 
         if ez <= ex.min(ey) {
-            // XY: Z es el “grosor” mínimo
             let a = ((rmax.x - rmin.x).abs() * 0.5).max(1e-6);
             let b = ((rmax.y - rmin.y).abs() * 0.5).max(1e-6);
             (a, b, true)
         } else if ey <= ex.min(ez) {
-            // XZ: Y es el “grosor” mínimo
             let a = ((rmax.x - rmin.x).abs() * 0.5).max(1e-6);
             let b = ((rmax.z - rmin.z).abs() * 0.5).max(1e-6);
-            (a, b, false) // usamos XZ dentro del shader cuando esto es false
+            (a, b, false)
         } else {
-            // YZ (poco común, pero por si acaso). Reutilizamos el flag + truco en shader:
-            // marcamos XY=true pero intercambiamos a/b y alimentamos (y,z) en el shader.
-            // Para no tocar Uniforms, aquí lo dejamos como XY y abajo te digo el tweak si lo quieres.
             let a = ((rmax.y - rmin.y).abs() * 0.5).max(1e-6);
             let b = ((rmax.z - rmin.z).abs() * 0.5).max(1e-6);
-            (a, b, true) // y en el shader cambiarías a RingPlane si algún día lo necesitas
+            (a, b, true)
         }
     };
 
-    let mut use_gas_giant = true; // G/H para alternar
+    // ===== Estado de selección de planeta/shader y toggles =====
+    let mut planet_mode: u8 = 1; // 1..6
     let time_origin = Instant::now();
+
+    let mut show_rings = false;
+    let mut show_moon1 = true;
+    let mut show_moon2 = false;
+
+    let mut prev_z = false;
+    let mut prev_x = false;
+    let mut prev_c = false;
 
     while window.is_open() {
         if window.is_key_down(Key::Escape) { break; }
 
         handle_input_camera(&window, &mut camera, &mut scale);
 
-        if window.is_key_down(Key::G) { use_gas_giant = true; }
-        if window.is_key_down(Key::H) { use_gas_giant = false; }
+        // ==== Selección de planeta / estrella con teclas 1–6 ====
+        if window.is_key_down(Key::Key1) { planet_mode = 1; }
+        if window.is_key_down(Key::Key2) { planet_mode = 2; }
+        if window.is_key_down(Key::Key3) { planet_mode = 3; }
+        if window.is_key_down(Key::Key4) { planet_mode = 4; }
+        if window.is_key_down(Key::Key5) { planet_mode = 5; }
+        if window.is_key_down(Key::Key6) { planet_mode = 6; }
+
+        // ==== Toggles con Z (anillos), X (luna1), C (luna2) ====
+        let z_down = window.is_key_down(Key::Z);
+        if z_down && !prev_z {
+            show_rings = !show_rings;
+        }
+        prev_z = z_down;
+
+        let x_down = window.is_key_down(Key::X);
+        if x_down && !prev_x {
+            show_moon1 = !show_moon1;
+        }
+        prev_x = x_down;
+
+        let c_down = window.is_key_down(Key::C);
+        if c_down && !prev_c {
+            show_moon2 = !show_moon2;
+        }
+        prev_c = c_down;
 
         framebuffer.clear();
 
@@ -601,7 +892,7 @@ fn main() {
         let auto_spin_y = elapsed * 0.20;
         let rotation_auto = nalgebra_glm::Vec3::new(rotation.x, rotation.y + auto_spin_y, rotation.z);
 
-        // ===== Planeta =====
+        // ===== Planeta / Estrella =====
         let model_matrix = create_model_matrix(translation, scale, rotation_auto);
         let uniforms_base = Uniforms {
             model_matrix,
@@ -611,38 +902,78 @@ fn main() {
             ring_a, ring_b, ring_plane_xy,
         };
 
-        if use_gas_giant {
-            render_pass(&mut framebuffer, &uniforms_base, &obj, &gas_shader);
-        } else {
-            render_pass(&mut framebuffer, &uniforms_base, &obj, &terrain_shader);
+        match planet_mode {
+            // 1: Tierra con nubes
+            1 => {
+                render_pass(&mut framebuffer, &uniforms_base, &obj, &terrain_shader);
 
-            let overlay_scale = scale * 1.02;
-            let model_matrix_overlay = create_model_matrix(translation, overlay_scale, rotation_auto);
-            let uniforms_overlay = Uniforms {
-                model_matrix: model_matrix_overlay,
-                view_matrix: camera.view_matrix(),
-                time: elapsed,
-                seed: 4242,
-                ring_a, ring_b, ring_plane_xy,
-            };
-            render_pass_alpha(&mut framebuffer, &uniforms_overlay, &obj, &clouds_shader, 0.0);
+                let overlay_scale = scale * 1.02;
+                let model_matrix_overlay = create_model_matrix(translation, overlay_scale, rotation_auto);
+                let uniforms_overlay = Uniforms {
+                    model_matrix: model_matrix_overlay,
+                    view_matrix: camera.view_matrix(),
+                    time: elapsed,
+                    seed: 4242,
+                    ring_a, ring_b, ring_plane_xy,
+                };
+                render_pass_alpha(&mut framebuffer, &uniforms_overlay, &obj, &clouds_shader, 0.0);
+            }
+            // 2: Gigante gaseoso tipo Júpiter
+            2 => {
+                render_pass(&mut framebuffer, &uniforms_base, &obj, &gas_shader);
+            }
+            // 3: Marte rocoso
+            3 => {
+                render_pass(&mut framebuffer, &uniforms_base, &obj, &mars_shader);
+
+                let overlay_scale = scale * 1.02;
+                let model_matrix_overlay = create_model_matrix(translation, overlay_scale, rotation_auto);
+                let uniforms_overlay = Uniforms {
+                    model_matrix: model_matrix_overlay,
+                    view_matrix: camera.view_matrix(),
+                    time: elapsed,
+                    seed: 4242,
+                    ring_a, ring_b, ring_plane_xy,
+                };
+                render_pass_alpha(&mut framebuffer, &uniforms_overlay, &obj, &mars_clouds_shader, 0.0);
+            }
+            // 4: Urano
+            4 => {
+                render_pass(&mut framebuffer, &uniforms_base, &obj, &uranus_shader);
+            }
+            // 5: Saturno
+            5 => {
+                render_pass(&mut framebuffer, &uniforms_base, &obj, &saturn_shader);
+            }
+            // 6: Estrella / sol
+            6 => {
+                render_pass(&mut framebuffer, &uniforms_base, &obj, &star_shader);
+            }
+            _ => {
+                render_pass(&mut framebuffer, &uniforms_base, &obj, &terrain_shader);
+            }
         }
 
-        // ===== Anillos (z-bias negativo para evitar “corte”) =====
-        let rings_tilt = Vec3::new(0.35, rotation_auto.y, 0.05);
-        let rings_scale = scale * 1.2;
-        let rings_matrix = create_model_matrix(translation, rings_scale, rings_tilt);
-        let rings_uniforms = Uniforms {
-            model_matrix: rings_matrix,
-            view_matrix: camera.view_matrix(),
-            time: elapsed,
-            seed: 2025,
-            ring_a, ring_b, ring_plane_xy,
-        };
-        render_pass(&mut framebuffer, &rings_uniforms, &rings_obj, &rings_shader);
+        // ===== Anillos (z-bias negativo para evitar “corte”), si están activos =====
+        if show_rings {
+            let rings_tilt = Vec3::new(0.35, rotation_auto.y, 0.05);
+            let rings_scale = scale * 1.2;
+            let rings_matrix = create_model_matrix(translation, rings_scale, rings_tilt);
+            let rings_uniforms = Uniforms {
+                model_matrix: rings_matrix,
+                view_matrix: camera.view_matrix(),
+                time: elapsed,
+                seed: 2025,
+                ring_a, ring_b, ring_plane_xy,
+            };
+            render_pass(&mut framebuffer, &rings_uniforms, &rings_obj, &rings_shader);
+        }
 
-        // ===== Lunas =====
-        for m in &moons {
+        // ===== Lunas (según toggles) =====
+        for (i, m) in moons.iter().enumerate() {
+            if (i == 0 && !show_moon1) || (i == 1 && !show_moon2) {
+                continue;
+            }
             let mm = m.model_matrix(translation, scale, elapsed);
             let mu = Uniforms {
                 model_matrix: mm,
