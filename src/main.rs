@@ -680,17 +680,16 @@ fn main() {
         alpha_mode: AlphaMode::Opaque,
     };
 
-    // ===== Shader de anillos =====
-    let rings_shader = ProceduralLayerShader {
+    // ===== Shader de anillos tipo Saturno =====
+    let saturn_rings_shader = ProceduralLayerShader {
         noise: NoiseParams {
             kind: NoiseType::RadialGradient {
-                inner: 0.70,   // fracción del borde exterior
-                outer: 1.0,    // 1.0 == borde exterior del mesh
+                inner: 0.70,
+                outer: 1.0,
                 invert: false,
                 bias: 0.10,
                 gamma: 1.0,
             },
-            // resto sin uso
             scale: 1.0, octaves: 1, lacunarity: 2.0, gain: 0.5,
             cell_size: 1.0, w1: 1.0, w2: 0.0, w3: 0.0, w4: 0.0,
             dist: VoronoiDistance::Euclidean,
@@ -723,6 +722,62 @@ fn main() {
         lighting_enabled: false,
         light_dir: normalize(&Vec3::new(0.0, 1.0, 0.0)),
         light_min: 1.0, light_max: 1.0,
+        alpha_mode: AlphaMode::Opaque,
+    };
+
+    // ===== Shader de anillos tipo Urano (azules, franjas delgadas) =====
+    let uranus_rings_shader = ProceduralLayerShader {
+        noise: NoiseParams {
+            kind: NoiseType::RadialGradient {
+                inner: 0.82,   // anillo más estrecho, más “fino”
+                outer: 1.0,
+                invert: false,
+                bias: 0.08,
+                gamma: 1.1,
+            },
+            scale: 1.0, octaves: 1, lacunarity: 2.0, gain: 0.5,
+            cell_size: 1.0, w1: 1.0, w2: 0.0, w3: 0.0, w4: 0.0,
+            dist: VoronoiDistance::Euclidean,
+            animate_time: false, time_speed: 0.0,
+            animate_spin: true, spin_speed: 1.6, // un pelín más rápido
+
+            // pequeñísimo swirl para que no sea perfectamente estático
+            ring_swirl_amp: 0.03,
+            ring_swirl_freq: 14.0,
+
+            band_frequency: 0.0,
+            band_contrast: 0.0,
+            lat_shear: 0.0,
+            turb_scale: 0.0,
+            turb_octaves: 0,
+            turb_lacunarity: 0.0,
+            turb_gain: 0.0,
+            turb_amp: 0.0,
+            flow: FlowParams::default(),
+        },
+        // Alternamos oscuro / azul / cian con thresholds muy pegados
+        // para que algunas franjas sean bien delgaditas
+        color_stops: vec![
+            ColorStop { threshold: 0.00, color: Color::from_hex(0x02070B) }, // casi negro azulado
+            ColorStop { threshold: 0.10, color: Color::from_hex(0x0E2230) }, // azul muy oscuro
+            ColorStop { threshold: 0.14, color: Color::from_hex(0x1C5670) }, // franja azul más clara (delgada)
+            ColorStop { threshold: 0.18, color: Color::from_hex(0x050A10) }, // gap oscuro
+            ColorStop { threshold: 0.24, color: Color::from_hex(0x2E7E9E) }, // teal
+            ColorStop { threshold: 0.28, color: Color::from_hex(0x08141C) }, // gap
+            ColorStop { threshold: 0.34, color: Color::from_hex(0x58B4D3) }, // cian claro
+            ColorStop { threshold: 0.38, color: Color::from_hex(0x091822) }, // gap
+            ColorStop { threshold: 0.46, color: Color::from_hex(0x8ADBF0) }, // franja muy clara
+            ColorStop { threshold: 0.52, color: Color::from_hex(0x0A1820) }, // gap
+            ColorStop { threshold: 0.60, color: Color::from_hex(0x5DB3CD) },
+            ColorStop { threshold: 0.70, color: Color::from_hex(0x0A1218) },
+            ColorStop { threshold: 0.85, color: Color::from_hex(0x9FE5F7) }, // casi blanco azulado
+            ColorStop { threshold: 1.00, color: Color::from_hex(0x02060A) }, // fondo
+        ],
+        color_hardness: 0.30, // más dureza para que se noten las franjas finas
+        lighting_enabled: false,
+        light_dir: normalize(&Vec3::new(0.0, 1.0, 0.0)),
+        light_min: 1.0,
+        light_max: 1.0,
         alpha_mode: AlphaMode::Opaque,
     };
 
@@ -954,19 +1009,33 @@ fn main() {
             }
         }
 
-        // ===== Anillos (z-bias negativo para evitar “corte”), si están activos =====
+        // ===== Anillos =====
         if show_rings {
-            let rings_tilt = Vec3::new(0.35, rotation_auto.y, 0.05);
-            let rings_scale = scale * 1.2;
-            let rings_matrix = create_model_matrix(translation, rings_scale, rings_tilt);
-            let rings_uniforms = Uniforms {
-                model_matrix: rings_matrix,
-                view_matrix: camera.view_matrix(),
-                time: elapsed,
-                seed: 2025,
-                ring_a, ring_b, ring_plane_xy,
-            };
-            render_pass(&mut framebuffer, &rings_uniforms, &rings_obj, &rings_shader);
+            if planet_mode == 4 {
+                let rings_tilt = Vec3::new(1.35, rotation_auto.y, 0.0); // ~77° de inclinación
+                let rings_scale = scale * 1.05; // un poco más pegados al planeta
+                let rings_matrix = create_model_matrix(translation, rings_scale, rings_tilt);
+                let rings_uniforms = Uniforms {
+                    model_matrix: rings_matrix,
+                    view_matrix: camera.view_matrix(),
+                    time: elapsed,
+                    seed: 2042,
+                    ring_a, ring_b, ring_plane_xy,
+                };
+                render_pass(&mut framebuffer, &rings_uniforms, &rings_obj, &uranus_rings_shader);
+            } else {
+                let rings_tilt = Vec3::new(0.35, rotation_auto.y, 0.05);
+                let rings_scale = scale * 1.2;
+                let rings_matrix = create_model_matrix(translation, rings_scale, rings_tilt);
+                let rings_uniforms = Uniforms {
+                    model_matrix: rings_matrix,
+                    view_matrix: camera.view_matrix(),
+                    time: elapsed,
+                    seed: 2025,
+                    ring_a, ring_b, ring_plane_xy,
+                };
+                render_pass(&mut framebuffer, &rings_uniforms, &rings_obj, &saturn_rings_shader);
+            }
         }
 
         // ===== Lunas (según toggles) =====
